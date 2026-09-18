@@ -1,18 +1,10 @@
-ARG BASE_IMAGE=ubuntu:24.04
+ARG BASE_IMAGE=quay.io/mariadb-foundation/bb-worker:almalinux8-bintar
 FROM ${BASE_IMAGE}
 USER root
-ENV DEBIAN_FRONTEND=noninteractive
-ARG EXTRA_PACKAGES=""
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ca-certificates git python3 build-essential cmake bison pkg-config \
-    libssl-dev libncurses-dev libtirpc-dev libaio-dev libudev-dev \
-    libnuma-dev libcurl4-openssl-dev libldap2-dev libsasl2-dev \
-    krb5-multidev rpcsvc-proto perl ${EXTRA_PACKAGES} \
-    && rm -rf /var/lib/apt/lists/*
-RUN useradd --create-home --shell /bin/bash buildbot && mkdir -p /home/buildbot/bin \
-    && chown -R buildbot:buildbot /home/buildbot
-ENV PATH=/home/buildbot/bin:${PATH}
-COPY --chown=buildbot:buildbot --chmod=0755 sdk/prepare /home/buildbot/bin/prepare-component-sdk
+ARG EXTRA_PACKAGES="clamav-devel libcurl-devel libarchive-devel openssl-devel ca-certificates curl tar gzip libaio libaio-devel ncurses-libs numactl-libs"
+RUN dnf install -y epel-release && dnf install -y python3 git ${EXTRA_PACKAGES} && dnf clean all
+COPY sdk/prepare /home/buildbot/bin/prepare-plugin-sdk
+RUN chmod 0755 /home/buildbot/bin/prepare-plugin-sdk && chown -R buildbot:buildbot /home/buildbot/bin
 USER buildbot
 ARG MYSQL_VERSION
 RUN /home/buildbot/bin/prepare-component-sdk

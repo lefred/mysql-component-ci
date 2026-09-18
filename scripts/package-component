@@ -1,0 +1,109 @@
+#!/usr/bin/env bash
+# Retained from the original reusable workflow; also usable locally.
+set -euo pipefail
+
+component_name="$COMPONENT_NAME"
+component_library="$COMPONENT_LIBRARY"
+mysql_version="$MYSQL_VERSION"
+package_version="$PACKAGE_VERSION"
+architecture="$(uname -m)"
+[[ "$component_library" =~ ^[A-Za-z0-9_][A-Za-z0-9_.+-]*$ ]] || { echo 'Invalid component library filename' >&2; exit 1; }
+[[ "$mysql_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected exact MySQL version' >&2; exit 1; }
+[[ "$package_version" =~ ^[A-Za-z0-9_][A-Za-z0-9_.+-]*$ ]] || { echo 'Invalid package version' >&2; exit 1; }
+
+safe_component_name="$(
+  printf '%s' "${component_name}" |
+    tr '[:upper:]' '[:lower:]' |
+    sed -E 's/[^a-z0-9._+-]+/-/g'
+)"
+
+[[ "$safe_component_name" =~ ^[a-z0-9_][a-z0-9_.+-]*$ ]] || { echo 'Invalid component name' >&2; exit 1; }
+
+package_basename="${safe_component_name}-${package_version}-mysql${mysql_version}-linux-${architecture}"
+package_root="${GITHUB_WORKSPACE}/dist/${package_basename}"
+
+mkdir -p "${package_root}/lib/mysql/plugin"
+mkdir -p "${package_root}/share/doc/${safe_component_name}"
+
+install \
+  -m 0755 \
+  "$COMPONENT_PATH" \
+  "${package_root}/lib/mysql/plugin/${component_library}"
+
+for readme in \
+  "${COMPONENT_SOURCE:-$GITHUB_WORKSPACE/component-source}"/README \
+  "${COMPONENT_SOURCE:-$GITHUB_WORKSPACE/component-source}"/README.md \
+  "${COMPONENT_SOURCE:-$GITHUB_WORKSPACE/component-source}"/README.txt
+do
+  if [[ -f "${readme}" ]]; then
+    install \
+      -m 0644 \
+      "${readme}" \
+      "${package_root}/share/doc/${safe_component_name}/$(basename "${readme}")"
+  fi
+done
+
+for license in \
+  "${COMPONENT_SOURCE:-$GITHUB_WORKSPACE/component-source}"/LICENSE \
+  "${COMPONENT_SOURCE:-$GITHUB_WORKSPACE/component-source}"/LICENSE.md \
+  "${COMPONENT_SOURCE:-$GITHUB_WORKSPACE/component-source}"/COPYING
+do
+  if [[ -f "${license}" ]]; then
+    install \
+      -m 0644 \
+      "${license}" \
+      "${package_root}/share/doc/${safe_component_name}/$(basename "${license}")"
+  fi
+done
+
+cat > "${package_root}/INSTALL.txt" <<EOF
+MySQL component: ${component_name}
+Package version: ${package_version}
+MySQL release: ${mysql_version}
+Architecture: ${architecture}
+
+Component library:
+
+  lib/mysql/plugin/${component_library}
+
+Installation
+------------
+
+1. Determine the MySQL component directory:
+
+     SELECT @@plugin_dir;
+
+2. Copy ${component_library} into that directory.
+
+3. Activate the component (see its README for required configuration):
+
+     INSTALL COMPONENT 'file://${component_library%.so}';
+
+   To uninstall:
+
+     UNINSTALL COMPONENT 'file://${component_library%.so}';
+
+This binary was built from the MySQL ${mysql_version} release
+tag. Use it with the corresponding MySQL Server release.
+Install the component runtime dependencies described in its README.
+EOF
+
+tar \
+  -C "${GITHUB_WORKSPACE}/dist" \
+  -czf "${GITHUB_WORKSPACE}/dist/${package_basename}.tar.gz" \
+  "${package_basename}"
+
+(
+  cd "${GITHUB_WORKSPACE}/dist"
+
+  sha256sum \
+    "${package_basename}.tar.gz" \
+    > "${package_basename}.tar.gz.sha256"
+)
+
+if [[ -n ${GITHUB_OUTPUT:-} ]]; then
+  echo "basename=${package_basename}" >> "$GITHUB_OUTPUT"
+fi
+
+echo "Created package:"
+find "${GITHUB_WORKSPACE}/dist" -maxdepth 1 -type f -print

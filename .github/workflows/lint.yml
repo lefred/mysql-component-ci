@@ -1,0 +1,44 @@
+name: Lint workflows
+
+on:
+  push:
+    branches:
+      - main
+
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  actionlint:
+    runs-on: ubuntu-24.04
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v5
+
+      - name: Download actionlint
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          version="1.7.12"
+
+          curl \
+            --fail \
+            --location \
+            --silent \
+            --show-error \
+            "https://github.com/rhysd/actionlint/releases/download/v${version}/actionlint_${version}_linux_amd64.tar.gz" | tar xz actionlint
+
+          sudo install -m 0755 actionlint /usr/local/bin/actionlint
+
+      - name: Validate GitHub Actions workflows
+        run: actionlint
+
+      - name: Validate SDK helpers and packaging
+        run: |
+          bash -n sdk/prepare scripts/package-component
+          python3 -m unittest discover -s tests -v

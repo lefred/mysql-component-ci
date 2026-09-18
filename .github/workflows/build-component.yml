@@ -1,0 +1,352 @@
+name: Build lefred MySQL component
+
+on:
+  workflow_call:
+    inputs:
+      component_name:
+        description: Human-readable component name used in package names
+        required: true
+        type: string
+
+      component_directory:
+        description: Directory name under MySQL server/components; defaults to repository name
+        required: false
+        default: ""
+        type: string
+
+      build_target:
+        description: CMake target; empty enables detection
+        required: false
+        default: ""
+        type: string
+
+      component_library:
+        description: Generated shared library filename, for example component_uuid_v7.so
+        required: true
+        type: string
+
+      cmake_options:
+        description: Additional CMake options, for example -DWITH_SSL=system
+        required: false
+        default: ""
+        type: string
+
+      test_suite:
+        description: MySQL Test Runner suite name
+        required: false
+        default: ""
+        type: string
+
+      run_tests:
+        description: Run the MTR test suite
+        required: false
+        default: false
+        type: boolean
+
+      package_version:
+        description: Version used in package filenames; defaults to tag or commit
+        required: false
+        default: ""
+        type: string
+
+      artifact_retention_days:
+        description: Number of days to retain workflow artifacts
+        required: false
+        default: 14
+        type: number
+
+      mysql_versions:
+        description: Exact x.y.z releases, one per line or a JSON array (required for reproducibility)
+        required: true
+        type: string
+      sdk_image:
+        description: Prepared image repository; version is appended as its tag
+        default: quay.io/lefred14/mysql-component-build
+        type: string
+      sdk_images:
+        description: Optional JSON object mapping exact releases to full image references (prefer digests)
+        default: '{}'
+        type: string
+      extra_packages:
+        description: Optional APT package specifications; prefer baking dependencies into the SDK
+        default: ''
+        type: string
+      test_runtime:
+        description: Path inside a custom SDK to a matching prebuilt MySQL binary distribution with MTR
+        default: ''
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  versions:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - id: matrix
+        name: Validate exact releases and resolve SDK images
+        env:
+          VERSIONS: ${{ inputs.mysql_versions }}
+          SDK_IMAGE: ${{ inputs.sdk_image }}
+          SDK_IMAGES: ${{ inputs.sdk_images }}
+        run: |
+          python3 - <<'PYTHON'
+          import json, os, re
+          raw = os.environ['VERSIONS'].strip()
+          versions = json.loads(raw) if raw.startswith('[') else raw.split()
+          if not isinstance(versions, list) or not versions or len(versions) > 256:
+              raise SystemExit('mysql_versions must contain 1..256 exact releases')
+          images = json.loads(os.environ['SDK_IMAGES'])
+          if not isinstance(images, dict):
+              raise SystemExit('sdk_images must be a JSON object')
+          matrix = []
+          for version in versions:
+              if not isinstance(version, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
+                  raise SystemExit('Use exact MySQL releases (x.y.z), not branches or wildcards')
+              image = images.get(version, os.environ['SDK_IMAGE'] + ':' + version)
+              if not isinstance(image, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9./:@_-]*', image):
+                  raise SystemExit('Invalid SDK image reference')
+              row = {'mysql_version': version, 'image': image}
+              if row not in matrix:
+                  matrix.append(row)
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
+              output.write('matrix=' + json.dumps({'include': matrix}) + '\n')
+          PYTHON
+
+  build:
+    name: MySQL ${{ matrix.mysql_version }}
+    needs: versions
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.versions.outputs.matrix) }}
+    container:
+      image: ${{ matrix.image }}
+      options: --user root
+    defaults:
+      run:
+        shell: bash
+    env:
+      COMPONENT_DIRECTORY: ${{ inputs.component_directory }}
+      COMPONENT_LIBRARY: ${{ inputs.component_library }}
+      CMAKE_OPTIONS: ${{ inputs.cmake_options }}
+      MYSQL_VERSION: ${{ matrix.mysql_version }}
+    steps:
+      - name: Check out component repository at triggering commit
+        uses: actions/checkout@v5
+        with:
+          path: component-source
+          submodules: recursive
+
+      - name: Verify prepared SDK and test runtime
+        env:
+          RUN_TESTS: ${{ inputs.run_tests }}
+          TEST_RUNTIME: ${{ inputs.test_runtime }}
+        run: |
+          set -euo pipefail
+          test "$(cat /home/buildbot/mysql-sdk-version)" = "$MYSQL_VERSION" || {
+            echo '::error::SDK version does not match the requested MySQL release'; exit 1;
+          }
+          test -f /home/buildbot/mysql-server/build/CMakeCache.txt
+          test -x /home/buildbot/bin/build-component
+          test -x /home/buildbot/bin/package-component
+          if [[ "$RUN_TESTS" == true && ( "$TEST_RUNTIME" != /* || ! -f "$TEST_RUNTIME/mysql-test/mysql-test-run.pl" ) ]]; then
+            echo '::error::run_tests requires test_runtime pointing to a matching prebuilt MySQL distribution with MTR. Use run_tests: false for SDK-only builds.'
+            exit 1
+          fi
+
+      - name: Install optional component dependencies
+        env:
+          EXTRA_PACKAGES: ${{ inputs.extra_packages }}
+        run: |
+          set -euo pipefail
+          if [[ -n "$EXTRA_PACKAGES" ]]; then
+            read -r -a packages <<< "$EXTRA_PACKAGES"
+            apt-get update
+            apt-get install -y -- "${packages[@]}"
+          fi
+
+      - name: Build only the component target
+        id: locate-component
+        env:
+          BUILD_TARGET: ${{ inputs.build_target }}
+          COMPONENT_SOURCE: ${{ github.workspace }}/component-source
+          COMPONENT_REPOSITORY: ${{ github.server_url }}/${{ github.repository }}.git
+        run: |
+          set -euo pipefail
+          # The source tree belongs to buildbot; checkout and build run as container root.
+          git config --global --add safe.directory /home/buildbot/mysql-server
+          /home/buildbot/bin/build-component "$COMPONENT_REPOSITORY" "$BUILD_TARGET"
+
+      - name: Run MTR using prebuilt runtime
+        if: ${{ inputs.run_tests }}
+        env:
+          TEST_RUNTIME: ${{ inputs.test_runtime }}
+          TEST_SUITE: ${{ inputs.test_suite }}
+          COMPONENT_PATH: ${{ steps.locate-component.outputs.path }}
+        run: |
+          set -euo pipefail
+          suite="${TEST_SUITE:-${COMPONENT_DIRECTORY:-${GITHUB_REPOSITORY##*/}}}"
+          [[ "$suite" =~ ^[A-Za-z0-9_][A-Za-z0-9_.+-]*$ ]] || { echo 'Invalid test suite'; exit 1; }
+          server="$TEST_RUNTIME/bin/mysqld"
+          "$server" --version | grep -F -e "Ver $MYSQL_VERSION " -e "Ver $MYSQL_VERSION-" >/dev/null || {
+            echo '::error::Prebuilt test server version does not match SDK'; exit 1;
+          }
+          suite_source="$GITHUB_WORKSPACE/component-source/mysql-test/suite/$suite"
+          test -d "$suite_source" || { echo "::error::Missing test suite: $suite_source"; exit 1; }
+          test ! -e "$TEST_RUNTIME/mysql-test/suite/$suite" || { echo '::error::Test suite destination exists'; exit 1; }
+          ln -s "$suite_source" "$TEST_RUNTIME/mysql-test/suite/$suite"
+          mkdir -p "$RUNNER_TEMP/test-components"
+          cp "$COMPONENT_PATH" "$RUNNER_TEMP/test-components/$COMPONENT_LIBRARY"
+          cd "$TEST_RUNTIME/mysql-test"
+          perl mysql-test-run.pl --suite="$suite" \
+            --mysqld="--plugin-dir=$RUNNER_TEMP/test-components" \
+            --vardir="$RUNNER_TEMP/mtr-$suite-$MYSQL_VERSION" \
+            --tmpdir="$RUNNER_TEMP/mtr-tmp-$suite-$MYSQL_VERSION" --force --retry=1
+
+      - name: Determine package version
+        id: package-version
+        env:
+          INPUT_VERSION: ${{ inputs.package_version }}
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          version="$INPUT_VERSION"
+
+          if [[ -z "${version}" ]]; then
+            if [[ "${GITHUB_REF_TYPE}" == "tag" ]]; then
+              version="${GITHUB_REF_NAME}"
+            else
+              version="${GITHUB_SHA::12}"
+            fi
+          fi
+
+          # Keep package filenames predictable.
+          version="$(
+            printf '%s' "${version}" |
+              sed -E 's/[^A-Za-z0-9._+-]+/-/g'
+          )"
+
+          echo "version=${version}" >> "${GITHUB_OUTPUT}"
+
+      - name: Create binary package
+        id: package
+        env:
+          COMPONENT_NAME: ${{ inputs.component_name }}
+          PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
+          COMPONENT_PATH: ${{ steps.locate-component.outputs.path }}
+        shell: bash
+        run: /home/buildbot/bin/package-component
+
+      - name: Upload package
+        uses: actions/upload-artifact@v7
+        with:
+          name: ${{ steps.package.outputs.basename }}
+          path: |
+            dist/${{ steps.package.outputs.basename }}.tar.gz
+            dist/${{ steps.package.outputs.basename }}.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+  release:
+    name: Publish GitHub Release
+
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    needs:
+      - build
+
+    runs-on: ubuntu-24.04
+
+    permissions:
+      contents: write
+
+    steps:
+      - name: Download all packages
+        uses: actions/download-artifact@v8
+        with:
+          path: release-assets
+          merge-multiple: true
+          pattern: "*-mysql*-linux-*"
+
+      - name: Display release assets
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          find release-assets \
+            -maxdepth 1 \
+            -type f \
+            -printf '%f\n' |
+            sort
+
+          package_count="$(
+            find release-assets \
+              -maxdepth 1 \
+              -type f \
+              -name '*.tar.gz' |
+              wc -l
+          )"
+
+          checksum_count="$(
+            find release-assets \
+              -maxdepth 1 \
+              -type f \
+              -name '*.sha256' |
+              wc -l
+          )"
+
+          if [[ "${package_count}" -lt 1 ]]; then
+            echo "::error::No package was downloaded"
+            exit 1
+          fi
+
+          if [[ "${checksum_count}" -ne "${package_count}" ]]; then
+            echo "::error::Found ${package_count} packages but ${checksum_count} checksum files"
+            exit 1
+          fi
+
+      - name: Verify package checksums
+        shell: bash
+        run: |
+          set -euxo pipefail
+
+          cd release-assets
+
+          for checksum_file in *.sha256
+          do
+            sha256sum --check "${checksum_file}"
+          done
+
+      - name: Create or update GitHub Release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euxo pipefail
+
+          tag="${GITHUB_REF_NAME}"
+
+          if gh release view "${tag}" \
+               --repo "${GITHUB_REPOSITORY}" \
+               >/dev/null 2>&1
+          then
+            echo "Release ${tag} already exists; replacing its assets"
+
+            gh release upload "${tag}" \
+              release-assets/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --clobber
+          else
+            echo "Creating release ${tag}"
+
+            gh release create "${tag}" \
+              release-assets/* \
+              --repo "${GITHUB_REPOSITORY}" \
+              --verify-tag \
+              --title "${tag}" \
+              --generate-notes
+          fi

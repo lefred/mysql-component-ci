@@ -1,0 +1,26 @@
+ARG BASE_IMAGE=ubuntu:24.04
+FROM ${BASE_IMAGE}
+USER root
+ENV DEBIAN_FRONTEND=noninteractive
+ARG EXTRA_PACKAGES=""
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates git python3 build-essential cmake bison pkg-config \
+    libssl-dev libncurses-dev libtirpc-dev libaio-dev libudev-dev \
+    libnuma-dev libcurl4-openssl-dev libldap2-dev libsasl2-dev \
+    krb5-multidev rpcsvc-proto perl ${EXTRA_PACKAGES} \
+    && rm -rf /var/lib/apt/lists/*
+RUN useradd --create-home --shell /bin/bash buildbot && mkdir -p /home/buildbot/bin \
+    && chown -R buildbot:buildbot /home/buildbot
+ENV PATH=/home/buildbot/bin:${PATH}
+COPY --chown=buildbot:buildbot --chmod=0755 sdk/prepare /home/buildbot/bin/prepare-component-sdk
+USER buildbot
+ARG MYSQL_VERSION
+RUN /home/buildbot/bin/prepare-component-sdk
+# Keep helper changes separate from the expensive configured-source layer.
+USER root
+COPY --chown=buildbot:buildbot --chmod=0755 scripts/build-component scripts/package-component /home/buildbot/bin/
+RUN git config --system --add safe.directory /home/buildbot/mysql-server
+USER buildbot
+WORKDIR /home/buildbot/mysql-server/build
+ENTRYPOINT []
+CMD ["/bin/bash"]

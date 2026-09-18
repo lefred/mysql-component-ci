@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -euo pipefail
+[[ ${MYSQL_VERSION:-} =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'MYSQL_VERSION must be an exact x.y.z release' >&2; exit 1; }
+cd /home/buildbot
+# Avoid HTTP/2 stream resets during the large upstream checkout.
+git -c http.version=HTTP/1.1 clone --branch "mysql-${MYSQL_VERSION}" --depth 1 --recurse-submodules --shallow-submodules https://github.com/mysql/mysql-server.git mysql-server
+cd mysql-server
+test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/mysql-${MYSQL_VERSION}^{commit}")"
+git checkout --detach HEAD
+# MySQL 8.0 requires Boost; newer releases ignore these options if unnecessary.
+cmake -S . -B build \
+  -DCMAKE_BUILD_TYPE=RelWithDebInfo \
+  -DWITH_SSL=system -DWITH_UNIT_TESTS=OFF -DWITH_ROUTER=OFF \
+  -DDOWNLOAD_BOOST=ON -DWITH_BOOST=/home/buildbot/boost
+printf '%s\n' "$MYSQL_VERSION" > /home/buildbot/mysql-sdk-version
+git rev-parse HEAD > /home/buildbot/mysql-sdk-commit

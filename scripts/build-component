@@ -1,0 +1,99 @@
+#!/usr/bin/env python3
+"""Build one component in an already configured MySQL tree; never build all."""
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+
+def run(args, cwd=None, capture=False):
+    return subprocess.run(args, cwd=cwd, check=True, universal_newlines=True,
+                          stdout=subprocess.PIPE if capture else None).stdout
+
+
+def fail(message):
+    raise RuntimeError(message)
+
+
+def name(value):
+    if not re.fullmatch(r'[A-Za-z0-9_][A-Za-z0-9_.+-]*', value):
+        fail('Invalid name: ' + value)
+    return value
+
+
+def detect(cmake, help_text, explicit=''):
+    # Handles Makefile (... target) and Ninja (target: rule) help output.
+    available = set(re.findall(r'^\s*(?:\.\.\.\s+)?([\w.+-]+)(?=[:\s]|$)', help_text, re.M))
+    if explicit:
+        target = name(explicit)
+    else:
+        cmake = re.sub(r'#\[\[.*?\]\]', '', cmake, flags=re.S)
+        cmake = re.sub(r'#[^\n]*', '', cmake)
+        candidates = set('component_' + x.lower() for x in re.findall(
+            r'\bMYSQL_ADD_COMPONENT\s*\(\s*["\']?([A-Za-z0-9_+-]+)', cmake, re.I))
+        if len(candidates) != 1:
+            fail('Cannot unambiguously detect MYSQL_ADD_COMPONENT name; pass an explicit target')
+        target = candidates.pop()
+    if target.lower() in {'all', 'install', 'minbuild', 'mysqld', 'clean', 'test',
+                          'tests', 'component_all', 'component_mysql_server', 'help', 'package', 'package_source', 'dist', 'distclean'}:
+        fail('Not a component target: ' + target)
+    if target not in available:
+        fail("CMake target '{}' was not generated. Check cmake_options and component dependencies.\n{}".format(target, help_text))
+    return target
+
+
+def main():
+    if len(sys.argv) not in (2, 3):
+        fail('Usage: build-component <git-repository-url> [explicit-target]')
+    root = Path(os.environ.get('MYSQL_SOURCE', '/home/buildbot/mysql-server'))
+    build = root / 'build'
+    if not (build / 'CMakeCache.txt').is_file():
+        fail('Prepared CMake tree missing: ' + str(build))
+    url = sys.argv[1]
+    directory = name(os.environ.get('COMPONENT_DIRECTORY') or re.sub(r'\.git$', '', url.rstrip('/').split('/')[-1]))
+    component = root / 'components' / directory
+    source = os.environ.get('COMPONENT_SOURCE')
+    if source:
+        source = Path(source).resolve()
+        if component.exists() and component.resolve() != source:
+            fail('Component destination already exists: ' + str(component))
+        if not component.exists():
+            component.symlink_to(source, target_is_directory=True)
+    elif (component / '.git').exists():
+        origin = run(['git', 'remote', 'get-url', 'origin'], component, True).strip()
+        if re.sub(r'\.git$', '', origin.rstrip('/')) != re.sub(r'\.git$', '', url.rstrip('/')):
+            fail('Existing component origin differs from requested repository')
+        run(['git', 'pull', '--ff-only'], component)
+    elif component.exists():
+        fail('Component destination is not a Git checkout: ' + str(component))
+    else:
+        run(['git', 'clone', '--recursive', '--', url, str(component)])
+    if not source:
+        run(['git', 'submodule', 'update', '--init', '--recursive'], component)
+    if not (component / 'CMakeLists.txt').is_file():
+        fail('Component CMakeLists.txt missing: ' + str(component))
+    run(['cmake', '..'] + shlex.split(os.environ.get('CMAKE_OPTIONS', '')), build)
+    help_text = run(['cmake', '--build', '.', '--target', 'help'], build, True)
+    target = detect((component / 'CMakeLists.txt').read_text(), help_text,
+                    sys.argv[2] if len(sys.argv) == 3 else '')
+    run(['cmake', '--build', '.', '--target', target, '--parallel',
+         os.environ.get('BUILD_JOBS') or run(['nproc'], capture=True).strip()], build)
+    library = name(os.environ.get('COMPONENT_LIBRARY') or target + '.so')
+    matches = list(build.rglob(library))
+    matches = [p for p in matches if p.is_file()]
+    if len(matches) != 1:
+        fail('Expected one {}, found {} in {}'.format(library, len(matches), build))
+    print('Component library: ' + str(matches[0]))
+    output = os.environ.get('GITHUB_OUTPUT')
+    if output:
+        with open(output, 'a') as stream:
+            stream.write('path={}\ntarget={}\n'.format(matches[0].resolve(), target))
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (RuntimeError, OSError, subprocess.CalledProcessError) as error:
+        sys.exit('build-component: ' + str(error))

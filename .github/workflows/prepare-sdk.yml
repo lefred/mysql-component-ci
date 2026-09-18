@@ -1,0 +1,49 @@
+name: Prepare MySQL component SDK
+on:
+  workflow_dispatch:
+    inputs:
+      mysql_version:
+        description: Exact released MySQL version (x.y.z)
+        required: true
+        type: string
+      image_repository:
+        description: Registry repository to publish
+        default: quay.io/lefred14/mysql-component-build
+        type: string
+      extra_packages:
+        description: APT dependencies baked into the SDK (prefer pinned package versions)
+        default: ''
+        type: string
+      base_image:
+        description: Build worker image (use a digest for reproducibility)
+        default: ubuntu:24.04
+        type: string
+permissions:
+  contents: read
+jobs:
+  prepare:
+    runs-on: ubuntu-24.04
+    env:
+      VERSION: ${{ inputs.mysql_version }}
+      IMAGE: ${{ inputs.image_repository }}
+      EXTRA_PACKAGES: ${{ inputs.extra_packages }}
+      BASE_IMAGE: ${{ inputs.base_image }}
+    steps:
+      - uses: actions/checkout@v5
+      - name: Configure SDK without compiling MySQL
+        run: |
+          set -euo pipefail
+          [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected exact x.y.z release'; exit 1; }
+          podman build -f sdk/Containerfile -t "$IMAGE:$VERSION" \
+            --build-arg "MYSQL_VERSION=$VERSION" \
+            --build-arg "BASE_IMAGE=$BASE_IMAGE" \
+            --build-arg "EXTRA_PACKAGES=$EXTRA_PACKAGES" .
+      - name: Publish SDK
+        env:
+          REGISTRY_USER: ${{ secrets.SDK_REGISTRY_USER }}
+          REGISTRY_PASSWORD: ${{ secrets.SDK_REGISTRY_PASSWORD }}
+        run: |
+          set -euo pipefail
+          printf '%s' "$REGISTRY_PASSWORD" | podman login "${IMAGE%%/*}" --username "$REGISTRY_USER" --password-stdin
+          podman push --digestfile sdk.digest "$IMAGE:$VERSION"
+          echo "Prepared SDK: $IMAGE@$(cat sdk.digest)" >> "$GITHUB_STEP_SUMMARY"

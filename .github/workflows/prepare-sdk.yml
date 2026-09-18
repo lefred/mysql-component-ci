@@ -11,12 +11,12 @@ on:
         default: quay.io/lefred14/mysql-component-build
         type: string
       extra_packages:
-        description: APT dependencies baked into the SDK (prefer pinned package versions)
+        description: RPM dependencies baked into the SDK (prefer pinned package versions)
         default: ''
         type: string
       base_image:
         description: Build worker image (use a digest for reproducibility)
-        default: ubuntu:24.04
+        default: quay.io/mariadb-foundation/bb-worker:almalinux8-bintar
         type: string
 permissions:
   contents: read

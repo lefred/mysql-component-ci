@@ -15,7 +15,8 @@ for a registry account with push access. Dispatch
 The default destination is `quay.io/lefred14/mysql-component-build`.
 Images must be public for the reusable workflow; no images are assumed to exist.
 
-The image uses Ubuntu 24.04, its GCC/CMake toolchain, and development dependencies.
+The image uses the AlmaLinux 8 MariaDB build worker, its GCC/CMake toolchain,
+and development dependencies.
 It checks out the exact upstream `mysql-X.Y.Z` tag into
 `/home/buildbot/mysql-server`, verifies the tag, detaches HEAD, and configures
 `build/` with RelWithDebInfo, system OpenSSL, unit tests disabled, and Router disabled.
@@ -30,10 +31,11 @@ podman build -f sdk/Containerfile \
   -t localhost/mysql-component-build:8.4.6 .
 ```
 
-`BASE_IMAGE` must be compatible with Ubuntu's APT packages. `EXTRA_PACKAGES`
-adds whitespace-separated APT packages. Unlike the MariaDB repository, this
-repository does not use the MariaDB worker image or Galera configuration.
-Ubuntu-built binaries require compatible glibc, libstdc++, and runtime libraries
+`BASE_IMAGE` must provide the AlmaLinux-compatible DNF packages, buildbot user,
+`/home/buildbot/bin`, and build toolchain expected by the Containerfile.
+`EXTRA_PACKAGES` supplies whitespace-separated RPM packages. This repository
+uses the MariaDB worker image but does not add Galera configuration.
+Built binaries require compatible glibc, libstdc++, and runtime libraries
 on the destination; they are not universal Linux binaries.
 
 For reproducibility, pin the base image digest, package repositories/versions,
@@ -94,7 +96,7 @@ Other inputs:
 | `component_directory` | Directory under `components/`; defaults to repository name |
 | `build_target` | Optional explicit CMake target |
 | `cmake_options` | Shell-quoted CMake arguments, parsed without shell evaluation |
-| `extra_packages` | Optional APT packages installed before configuration; prefer baking them into the SDK |
+| `extra_packages` | Optional RPM packages installed before configuration; prefer baking them into the SDK |
 | `package_version` | Defaults to the Git tag or short commit SHA |
 | `artifact_retention_days` | Defaults to 14 |
 | `run_tests` | Defaults to false; requires a matching prebuilt MTR runtime when enabled |
@@ -190,8 +192,12 @@ compatibility. Validate SDK preparation and an actual component on each selected
 MySQL release before publishing images. Hosted Actions, registry publishing, and
 MTR require separate integration validation.
 
-Local validation: helper tests, Bash syntax, and actionlint passed. The Ubuntu
+Initial validation with the previous Ubuntu base: helper tests, Bash syntax,
+and actionlint passed. The Ubuntu
 container's dependency installation also completed. Full SDK preparation and a
 real UUID v7 build remain unverified: the upstream source transfer failed over
 HTTP/2, and the slow HTTP/1.1 retry was stopped before configuration. No SDK image
 has been published.
+
+The current AlmaLinux-based SDK still requires a complete container build to
+validate its toolchain and dependencies against the selected MySQL release.

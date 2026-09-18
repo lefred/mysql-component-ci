@@ -68,7 +68,7 @@ on:
         default: '{}'
         type: string
       extra_packages:
-        description: Optional APT package specifications; prefer baking dependencies into the SDK
+        description: Optional RPM package specifications; prefer baking dependencies into the SDK
         default: ''
         type: string
       test_runtime:
@@ -164,8 +164,7 @@ jobs:
           set -euo pipefail
           if [[ -n "$EXTRA_PACKAGES" ]]; then
             read -r -a packages <<< "$EXTRA_PACKAGES"
-            apt-get update
-            apt-get install -y -- "${packages[@]}"
+            dnf install -y -- "${packages[@]}"
           fi
 
       - name: Build only the component target

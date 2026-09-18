@@ -3,8 +3,8 @@ FROM ${BASE_IMAGE}
 USER root
 ARG EXTRA_PACKAGES="clamav-devel libcurl-devel libarchive-devel openssl-devel ca-certificates curl tar gzip libaio libaio-devel ncurses-libs numactl-libs"
 RUN dnf install -y epel-release && dnf install -y python3 git ${EXTRA_PACKAGES} && dnf clean all
-COPY sdk/prepare /home/buildbot/bin/prepare-plugin-sdk
-RUN chmod 0755 /home/buildbot/bin/prepare-plugin-sdk && chown -R buildbot:buildbot /home/buildbot/bin
+COPY sdk/prepare /home/buildbot/bin/prepare-component-sdk
+RUN chmod 0755 /home/buildbot/bin/prepare-component-sdk && chown -R buildbot:buildbot /home/buildbot/bin
 USER buildbot
 ARG MYSQL_VERSION
 RUN /home/buildbot/bin/prepare-component-sdk

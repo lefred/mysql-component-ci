@@ -2,7 +2,7 @@ ARG BASE_IMAGE=quay.io/mariadb-foundation/bb-worker:almalinux8-bintar
 FROM ${BASE_IMAGE}
 USER root
 ARG EXTRA_PACKAGES="clamav-devel"
-RUN dnf install -y epel-release && dnf install -y python3 libtirpc-devel libcurl-devel libarchive-devel git openssl-devel ca-certificates curl tar gzip libaio libaio-devel ncurses-libs numactl-libs gcc-toolset-14-gcc gcc-toolset-14-gcc-c++ gcc-toolset-14-binutils gcc-toolset-14-annobin-annocheck gcc-toolset-14-annobin-plugin-gcc ${EXTRA_PACKAGES} && dnf clean all
+RUN dnf install -y epel-release && dnf install -y python3 libtirpc-devel rpcgen libcurl-devel libarchive-devel git openssl-devel ca-certificates curl tar gzip libaio libaio-devel ncurses-libs numactl-libs gcc-toolset-14-gcc gcc-toolset-14-gcc-c++ gcc-toolset-14-binutils gcc-toolset-14-annobin-annocheck gcc-toolset-14-annobin-plugin-gcc ${EXTRA_PACKAGES} && dnf clean all
 COPY sdk/prepare /home/buildbot/bin/prepare-component-sdk
 RUN chmod 0755 /home/buildbot/bin/prepare-component-sdk && chown -R buildbot:buildbot /home/buildbot/bin
 USER buildbot

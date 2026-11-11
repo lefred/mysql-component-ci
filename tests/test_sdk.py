@@ -46,6 +46,44 @@ class SDKTests(unittest.TestCase):
                 result = subprocess.run(['python3', '-c', script], env=env, capture_output=True)
                 self.assertNotEqual(result.returncode, 0, invalid)
 
+    def test_package_runs_component_install_rules(self):
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            component = base / 'source'
+            component.mkdir()
+            for name in ('greeting.conf', 'greeting.sql', 'component_greeting.so'):
+                (component / name).write_text('fixture\n')
+            # Relative destinations land under the package root, as in a server
+            # tarball; DESTDIR also keeps absolute ones inside the package.
+            (component / 'CMakeLists.txt').write_text('''cmake_minimum_required(VERSION 3.10)
+project(fixture NONE)
+install(FILES component_greeting.so DESTINATION lib/plugin)
+install(FILES greeting.conf DESTINATION etc/mysql/greeting)
+install(FILES greeting.sql DESTINATION /usr/share/greeting)
+''')
+            build = base / 'build'
+            subprocess.run(['cmake', '-S', str(component), '-B', str(build)],
+                           check=True, stdout=subprocess.DEVNULL)
+            env = dict(os.environ, GITHUB_WORKSPACE=str(base), COMPONENT_SOURCE=str(component),
+                       COMPONENT_BUILD_DIR=str(build), COMPONENT_NAME='greeting',
+                       COMPONENT_LIBRARY='component_greeting.so',
+                       COMPONENT_PATH=str(component / 'component_greeting.so'),
+                       PACKAGE_VERSION='v1.0', MYSQL_VERSION='9.7.2')
+            env.pop('GITHUB_OUTPUT', None)
+            subprocess.run([str(ROOT / 'scripts/package-component')], env=env, check=True,
+                           stdout=subprocess.DEVNULL)
+            archive = next((base / 'dist').glob('*.tar.gz'))
+            with tarfile.open(archive) as tar:
+                paths = tar.getnames()
+                files = ('lib/plugin/component_greeting.so', 'etc/mysql/greeting/greeting.conf',
+                         'usr/share/greeting/greeting.sql')
+                for suffix in files:
+                    self.assertTrue(any(path.endswith('/' + suffix) for path in paths), suffix)
+                self.assertEqual(sum(path.endswith('/component_greeting.so') for path in paths), 1)
+                install = tar.extractfile(next(p for p in paths if p.endswith('/INSTALL.txt'))).read().decode()
+                for suffix in files:
+                    self.assertIn('  ' + suffix + '\n', install)
+
     def test_real_cmake_component_only_and_package(self):
         with tempfile.TemporaryDirectory() as temporary:
             base = Path(temporary)
@@ -83,7 +121,7 @@ endif()
             archive = next((base / 'dist').glob('*.tar.gz'))
             with tarfile.open(archive) as tar:
                 paths = tar.getnames()
-                for suffix in ('lib/mysql/plugin/component_banquise_agent.so', 'share/doc/banquise_agent/README.md',
+                for suffix in ('lib/plugin/component_banquise_agent.so', 'share/doc/banquise_agent/README.md',
                                'share/doc/banquise_agent/LICENSE', 'INSTALL.txt'):
                     self.assertTrue(any(path.endswith('/' + suffix) for path in paths), suffix)
                 install = tar.extractfile(next(p for p in paths if p.endswith('/INSTALL.txt'))).read().decode()

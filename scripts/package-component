@@ -22,13 +22,29 @@ safe_component_name="$(
 package_basename="${safe_component_name}-${package_version}-mysql${mysql_version}-linux-${architecture}"
 package_root="${GITHUB_WORKSPACE}/dist/${package_basename}"
 
-mkdir -p "${package_root}/lib/mysql/plugin"
 mkdir -p "${package_root}/share/doc/${safe_component_name}"
 
-install \
-  -m 0755 \
-  "$COMPONENT_PATH" \
-  "${package_root}/lib/mysql/plugin/${component_library}"
+# Run the component's own install rules (library, config files, SQL scripts,
+# ...). Each CMake source directory has a cmake_install.cmake that holds only
+# its rules. DESTDIR keeps absolute destinations inside the package too.
+component_build_dir="${COMPONENT_BUILD_DIR:-}"
+if [[ -z "$component_build_dir" && -n "${COMPONENT_DIRECTORY:-}" ]]; then
+  component_build_dir="${MYSQL_SOURCE:-/home/buildbot/mysql-server}/build/components/${COMPONENT_DIRECTORY}"
+fi
+if [[ -n "$component_build_dir" && -f "$component_build_dir/cmake_install.cmake" ]]; then
+  DESTDIR="$package_root" cmake \
+    -DCMAKE_INSTALL_PREFIX=/ \
+    -P "$component_build_dir/cmake_install.cmake"
+fi
+
+# Components without install rules (or SKIP_INSTALL): copy the library to the
+# server tarball's plugin directory.
+library_path="$(find "$package_root" -type f -name "$component_library" -print -quit)"
+if [[ -z "$library_path" ]]; then
+  library_path="${package_root}/lib/plugin/${component_library}"
+  install -D -m 0755 "$COMPONENT_PATH" "$library_path"
+fi
+library_relative="${library_path#"${package_root}/"}"
 
 for readme in \
   "${COMPONENT_SOURCE:-$GITHUB_WORKSPACE/component-source}"/README \
@@ -64,7 +80,14 @@ Architecture: ${architecture}
 
 Component library:
 
-  lib/mysql/plugin/${component_library}
+  ${library_relative}
+
+Files are laid out as in a MySQL server tarball: extract the package over the
+server's basedir, or copy each file to the matching directory.
+
+Package files:
+
+$(find "${package_root}" -type f ! -path "${package_root}/INSTALL.txt" -printf '  %P\n' | sort)
 
 Installation
 ------------
@@ -73,7 +96,8 @@ Installation
 
      SELECT @@plugin_dir;
 
-2. Copy ${component_library} into that directory.
+2. Copy ${component_library} into that directory, and any other files
+   listed above to where the component's README says.
 
 3. Activate the component (see its README for required configuration):
 

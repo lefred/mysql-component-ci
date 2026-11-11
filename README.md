@@ -145,15 +145,26 @@ Packages contain:
 
 ```text
 uuid_v7-v1.0.0-mysql8.4.6-linux-x86_64/
-├── lib/mysql/plugin/component_uuid_v7.so
+├── lib/plugin/component_uuid_v7.so
 ├── share/doc/uuid_v7/README.md
 ├── share/doc/uuid_v7/LICENSE
 └── INSTALL.txt
 ```
 
+The package runs the component's own CMake install rules, so files it installs
+with `INSTALL()` (configuration files, SQL scripts, ...) are packaged too, laid
+out as in a MySQL server tarball (the SDK uses the `STANDALONE` layout: the
+library goes to `lib/plugin/`, `INSTALL_MYSQLSHAREDIR` is `share/`). Only the
+rules in `components/<component_directory>` run, never the server's. Absolute
+destinations are kept inside the package. When the library is not installed by
+those rules, it is copied to `lib/plugin/`. Set `COMPONENT_BUILD_DIR` (or
+`COMPONENT_DIRECTORY`) to package install rules when running `package-component`
+by hand.
+
 Available README and license files are copied from the component repository.
 Runtime dependencies are not bundled. `INSTALL.txt` directs users to query
-`SELECT @@plugin_dir`, copy the library there, and activate it using
+`SELECT @@plugin_dir`, copy the library there (and any other packaged files
+where the component's README says), and activate it using
 `INSTALL COMPONENT 'file://component_uuid_v7'`. It also includes the matching
 `UNINSTALL COMPONENT` command. See the component's README for configuration.
 

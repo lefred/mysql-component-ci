@@ -22,7 +22,13 @@ safe_component_name="$(
 package_basename="${safe_component_name}-${package_version}-mysql${mysql_version}-linux-${architecture}"
 package_root="${GITHUB_WORKSPACE}/dist/${package_basename}"
 
-mkdir -p "${package_root}/share/doc/${safe_component_name}"
+# Marina installs an unverified (@community) build only into name-namespaced
+# directories: <plugindir>, share/mysql/<name>/ and etc/mysql/<name>/. Keep the
+# docs and the generated INSTALL note inside share/mysql/<name>/ (not
+# share/doc/<name>/ or the archive root) so the whole tarball installs from the
+# catalog without the build having to be marked verified.
+doc_dir="share/mysql/${safe_component_name}"
+mkdir -p "${package_root}/${doc_dir}"
 
 # Run the component's own install rules (library, config files, SQL scripts,
 # ...). Each CMake source directory has a cmake_install.cmake that holds only
@@ -55,7 +61,7 @@ do
     install \
       -m 0644 \
       "${readme}" \
-      "${package_root}/share/doc/${safe_component_name}/$(basename "${readme}")"
+      "${package_root}/${doc_dir}/$(basename "${readme}")"
   fi
 done
 
@@ -68,11 +74,11 @@ do
     install \
       -m 0644 \
       "${license}" \
-      "${package_root}/share/doc/${safe_component_name}/$(basename "${license}")"
+      "${package_root}/${doc_dir}/$(basename "${license}")"
   fi
 done
 
-cat > "${package_root}/INSTALL.txt" <<EOF
+cat > "${package_root}/${doc_dir}/INSTALL.txt" <<EOF
 MySQL component: ${component_name}
 Package version: ${package_version}
 MySQL release: ${mysql_version}
@@ -87,7 +93,7 @@ server's basedir, or copy each file to the matching directory.
 
 Package files:
 
-$(find "${package_root}" -type f ! -path "${package_root}/INSTALL.txt" -printf '  %P\n' | sort)
+$(find "${package_root}" -type f ! -path "${package_root}/${doc_dir}/INSTALL.txt" -printf '  %P\n' | sort)
 
 Installation
 ------------

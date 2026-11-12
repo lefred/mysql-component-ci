@@ -118,22 +118,190 @@ tag. Use it with the corresponding MySQL Server release.
 Install the component runtime dependencies described in its README.
 EOF
 
-tar \
-  -C "${GITHUB_WORKSPACE}/dist" \
-  -czf "${GITHUB_WORKSPACE}/dist/${package_basename}.tar.gz" \
-  "${package_basename}"
+dist="${GITHUB_WORKSPACE}/dist"
+read -r -a formats <<< "${PACKAGE_FORMATS:-tgz}"
+(( ${#formats[@]} )) || { echo 'PACKAGE_FORMATS is empty' >&2; exit 1; }
+for format in "${formats[@]}"; do
+  [[ "$format" =~ ^(tgz|rpm|deb)$ ]] || { echo "Unknown package format: $format (use tgz, rpm, deb)" >&2; exit 1; }
+done
+created=()
+
+# ---------------------------------------------------------------------------
+# rpm / deb: install the tarball layout into system paths, as MySQL's own
+# packages do. Tarball-relative directories are remapped; anything else (etc/,
+# usr/, opt/, ... from absolute install destinations) is kept as is.
+# ---------------------------------------------------------------------------
+system_package_name="mysql-component-$(printf '%s' "$safe_component_name" | tr '_' '-')"
+system_package_name="${system_package_name/#mysql-component-component-/mysql-component-}"
+[[ "$system_package_name" =~ ^[a-z0-9][a-z0-9.+-]+$ ]] || { echo 'Invalid system package name' >&2; exit 1; }
+
+# Debian and RPM versions must start with a digit and may not contain "-" or
+# "_". Tags such as v1.2.0-rc1 become 1.2.0~rc1 (sorting before 1.2.0); a
+# commit hash (untagged build) becomes 0~<hash>.
+system_version="${package_version#v}"
+system_version="${system_version//-/\~}"
+system_version="${system_version//_/.}"
+if [[ ! "$system_version" =~ ^[0-9] || "$system_version" =~ ^[0-9a-f]{7,40}$ ]]; then
+  system_version="0~${system_version}"
+fi
+[[ "$system_version" =~ ^[0-9][A-Za-z0-9.+~]*$ ]] || { echo "Cannot derive a package version from $package_version" >&2; exit 1; }
+system_release="${PACKAGE_RELEASE:-1}"
+[[ "$system_release" =~ ^[0-9]+$ ]] || { echo 'PACKAGE_RELEASE must be a number' >&2; exit 1; }
+
+summary="MySQL component ${safe_component_name} for MySQL Server ${mysql_version}"
+homepage=
+if [[ -n "${GITHUB_SERVER_URL:-}" && -n "${GITHUB_REPOSITORY:-}" ]]; then
+  homepage="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}"
+fi
+owner="${GITHUB_REPOSITORY_OWNER:-mysql-component-ci}"
+maintainer="${PACKAGE_MAINTAINER:-${owner} <${owner}@users.noreply.github.com>}"
+license="${PACKAGE_LICENSE:-Unknown}"
+for field in "$maintainer" "$license" "${RPM_REQUIRES:-}" "${DEB_DEPENDS:-}"; do
+  [[ "$field" != *$'\n'* ]] || { echo 'Package metadata must be a single line' >&2; exit 1; }
+done
+
+# stage_system ROOT PLUGINDIR LIBDIR: copy package_root into ROOT with system paths.
+stage_system() {
+  local root="$1" plugindir="$2" libdir="$3" relative destination
+  while IFS= read -r -d '' relative; do
+    case "$relative" in
+      "${doc_dir}"/*) destination="/usr/share/doc/${system_package_name}/${relative#"${doc_dir}/"}" ;;
+      lib/plugin/*)   destination="${plugindir}/${relative#lib/plugin/}" ;;
+      lib/*)          destination="${libdir}/${relative#lib/}" ;;
+      share/*)        destination="/usr/share/mysql/${relative#share/}" ;;
+      bin/*)          destination="/usr/bin/${relative#bin/}" ;;
+      man/*)          destination="/usr/share/man/${relative#man/}" ;;
+      docs/*)         destination="/usr/share/doc/${system_package_name}/${relative#docs/}" ;;
+      include/*)      destination="/usr/include/mysql/${relative#include/}" ;;
+      *)              destination="/${relative}" ;;
+    esac
+    mkdir -p "${root}$(dirname "$destination")"
+    cp -a "${package_root}/${relative}" "${root}${destination}"
+  done < <(cd "$package_root" && find . \( -type f -o -type l \) -printf '%P\0')
+}
+
+work="$(mktemp -d)"
+trap 'rm -rf "$work"' EXIT
+
+for format in "${formats[@]}"; do
+  case "$format" in
+    tgz)
+      tar -C "$dist" -czf "${dist}/${package_basename}.tar.gz" "${package_basename}"
+      created+=("${package_basename}.tar.gz")
+      ;;
+
+    rpm)
+      command -v rpmbuild >/dev/null || { echo 'rpmbuild is required for rpm packages (dnf install rpm-build)' >&2; exit 1; }
+      buildroot="${work}/rpm-root"
+      # MySQL Community/Oracle Linux RPM layout.
+      stage_system "$buildroot" /usr/lib64/mysql/plugin /usr/lib64
+      {
+        cat <<EOF
+%global debug_package %{nil}
+%global _build_id_links none
+%undefine source_date_epoch_from_changelog
+Name: ${system_package_name}
+Version: ${system_version}
+Release: ${system_release}.mysql${mysql_version}%{?dist}
+Summary: ${summary}
+License: ${license//%/%%}
+EOF
+        [[ -z "$homepage" ]] || echo "URL: ${homepage}"
+        [[ -z "${RPM_REQUIRES:-}" ]] || echo "Requires: ${RPM_REQUIRES//%/%%}"
+        cat <<EOF
+
+%description
+${summary}.
+Built from the MySQL ${mysql_version} release tag; use it with that
+server release. Activate it with:
+  INSTALL COMPONENT 'file://${component_library%.so}';
+
+%install
+cp -a '${buildroot}/.' %{buildroot}/
+
+%files
+%defattr(-,root,root,-)
+EOF
+        while IFS= read -r -d '' file; do
+          file="/${file}"
+          file="${file//%/%%}"
+          if [[ "$file" == /etc/* ]]; then
+            printf '%%config(noreplace) "%s"\n' "$file"
+          else
+            printf '"%s"\n' "$file"
+          fi
+        done < <(cd "$buildroot" && find . \( -type f -o -type l \) -printf '%P\0' | sort -z)
+        echo "%dir \"/usr/share/doc/${system_package_name}\""
+      } > "${work}/${system_package_name}.spec"
+      rpmbuild -bb \
+        --define "_topdir ${work}/rpmbuild" \
+        --define "_rpmdir ${work}/rpms" \
+        --define '_build_name_fmt %%{NAME}-%%{VERSION}-%%{RELEASE}.%%{ARCH}.rpm' \
+        "${work}/${system_package_name}.spec"
+      for rpm_file in "${work}"/rpms/*.rpm; do
+        mv "$rpm_file" "$dist/"
+        created+=("$(basename "$rpm_file")")
+      done
+      ;;
+
+    deb)
+      command -v dpkg-deb >/dev/null || { echo 'dpkg-deb is required for deb packages (dnf install dpkg)' >&2; exit 1; }
+      case "$architecture" in
+        x86_64) deb_architecture=amd64 ;;
+        aarch64) deb_architecture=arm64 ;;
+        *) deb_architecture="$architecture" ;;
+      esac
+      debroot="${work}/deb-root"
+      # Debian/Ubuntu MySQL layout.
+      stage_system "$debroot" /usr/lib/mysql/plugin "/usr/lib/${architecture}-linux-gnu"
+      # Match rpmbuild: ship stripped ELF objects.
+      while IFS= read -r -d '' elf; do
+        if [[ "$(head -c 4 "$elf")" == $'\x7fELF' ]]; then
+          strip --strip-unneeded "$elf"
+        fi
+      done < <(find "$debroot" -type f -print0)
+      mkdir -p "${debroot}/DEBIAN"
+      (
+        cd "$debroot"
+        find . -path ./DEBIAN -prune -o -type f -printf '%P\0' | sort -z | xargs -0r md5sum
+      ) > "${debroot}/DEBIAN/md5sums"
+      if [[ -d "${debroot}/etc" ]]; then
+        (cd "$debroot" && find etc -type f -printf '/%p\n' | sort) > "${debroot}/DEBIAN/conffiles"
+      fi
+      deb_version="${system_version}-${system_release}+mysql${mysql_version}"
+      {
+        echo "Package: ${system_package_name}"
+        echo "Version: ${deb_version}"
+        echo "Architecture: ${deb_architecture}"
+        echo "Maintainer: ${maintainer}"
+        echo "Installed-Size: $(du -sk --exclude=DEBIAN "$debroot" | cut -f1)"
+        [[ -z "${DEB_DEPENDS:-}" ]] || echo "Depends: ${DEB_DEPENDS}"
+        echo "Section: database"
+        echo "Priority: optional"
+        [[ -z "$homepage" ]] || echo "Homepage: ${homepage}"
+        echo "Description: ${summary}"
+        echo " Built from the MySQL ${mysql_version} release tag; use it with that"
+        echo " server release. Activate it with:"
+        echo "   INSTALL COMPONENT 'file://${component_library%.so}';"
+      } > "${debroot}/DEBIAN/control"
+      deb_file="${system_package_name}_${deb_version}_${deb_architecture}.deb"
+      chmod -R u+rwX,go+rX,go-w "$debroot"
+      dpkg-deb --root-owner-group --build "$debroot" "${dist}/${deb_file}"
+      created+=("$deb_file")
+      ;;
+  esac
+done
 
 (
-  cd "${GITHUB_WORKSPACE}/dist"
-
-  sha256sum \
-    "${package_basename}.tar.gz" \
-    > "${package_basename}.tar.gz.sha256"
+  cd "$dist"
+  for file in "${created[@]}"; do
+    sha256sum -- "$file" > "${file}.sha256"
+  done
 )
 
 if [[ -n ${GITHUB_OUTPUT:-} ]]; then
   echo "basename=${package_basename}" >> "$GITHUB_OUTPUT"
 fi
 
-echo "Created package:"
-find "${GITHUB_WORKSPACE}/dist" -maxdepth 1 -type f -print
+echo "Created packages:"
+printf '  %s\n' "${created[@]}"

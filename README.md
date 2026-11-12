@@ -102,6 +102,11 @@ Other inputs:
 | `run_tests` | Defaults to false; requires a matching prebuilt MTR runtime when enabled |
 | `test_runtime` | Absolute path inside a custom SDK to that runtime |
 | `test_suite` | MTR suite name; defaults to component directory/repository name |
+| `package_formats` | `tgz`, `rpm` and/or `deb`, whitespace-separated; defaults to all three |
+| `package_license` | License in rpm/deb metadata (for example `GPL-2.0-only`); defaults to `Unknown` |
+| `package_maintainer` | Debian `Maintainer`; defaults to the repository owner's GitHub noreply address |
+| `rpm_requires` | Optional RPM `Requires`, for example `mysql-community-server = 8.4.6` |
+| `deb_depends` | Optional Debian `Depends`, for example `mysql-server (>= 8.4.6)` |
 
 When `build_target` is empty, the helper reads one literal `MYSQL_ADD_COMPONENT`
 name and resolves the `component_<lowercase-name>` target. Multiple declarations
@@ -141,14 +146,14 @@ builds; do not replace a prepared tree with another source/build tree.
 
 ## Packages and installation
 
-Packages contain:
+Tarballs contain:
 
 ```text
 uuid_v7-v1.0.0-mysql8.4.6-linux-x86_64/
 ├── lib/plugin/component_uuid_v7.so
-├── share/doc/uuid_v7/README.md
-├── share/doc/uuid_v7/LICENSE
-└── INSTALL.txt
+├── share/mysql/uuid_v7/README.md
+├── share/mysql/uuid_v7/LICENSE
+└── share/mysql/uuid_v7/INSTALL.txt
 ```
 
 The package runs the component's own CMake install rules, so files it installs
@@ -168,11 +173,48 @@ where the component's README says), and activate it using
 `INSTALL COMPONENT 'file://component_uuid_v7'`. It also includes the matching
 `UNINSTALL COMPONENT` command. See the component's README for configuration.
 
-Builds upload tarballs and SHA256 files as Actions artifacts. On `v*` tags,
+Builds upload tarballs, RPMs, debs and their SHA256 files as Actions artifacts. On `v*` tags,
 a final job downloads the build artifacts, verifies checksums, and creates or
 updates the caller repository's GitHub Release. Manual runs on branches only
 upload artifacts. Packages target Linux x86_64 on the hosted runner and the exact
 MySQL release used to build them.
+
+### RPM and Debian packages
+
+With `package_formats` containing `rpm` and/or `deb` (the default), the same
+files are also packaged for the system layout used by MySQL's own packages:
+
+| Tarball path | RPM | DEB |
+| --- | --- | --- |
+| `lib/plugin/` | `/usr/lib64/mysql/plugin/` | `/usr/lib/mysql/plugin/` |
+| `share/mysql/<name>/` (docs) | `/usr/share/doc/mysql-component-<name>/` | same |
+| `share/` | `/usr/share/mysql/` | same |
+| `bin/` | `/usr/bin/` | same |
+| `etc/`, `usr/`, ... (absolute destinations) | unchanged, `/etc` files are `%config(noreplace)` | unchanged, `/etc` files are conffiles |
+
+```text
+mysql-component-uuid-v7-1.0.0-1.mysql8.4.6.el8.x86_64.rpm
+mysql-component-uuid-v7_1.0.0-1+mysql8.4.6_amd64.deb
+```
+
+The package name is `mysql-component-<name>` with `_` turned into `-` (a leading
+`component_` is dropped). The version is the tag without its `v`; `-` becomes `~`
+so `v1.2.0-rc1` sorts before `1.2.0`, and untagged builds get `0~<commit>`.
+The MySQL release is part of the RPM release / Debian revision, since a component
+only works with the server it was built against. `PACKAGE_RELEASE` (default 1)
+sets the package release number when running `package-component` by hand.
+
+Both formats are built inside the AlmaLinux 8 SDK (`rpmbuild`, and `dpkg-deb`
+from EPEL). RPMs get automatic shared-library `Requires`; the `.deb` only gets
+what `deb_depends` lists, and its binary is the same EL8-built library, so
+check that its runtime libraries (for example OpenSSL 1.1 versus 3) exist on the
+target Debian/Ubuntu release. No dependency on a server package is added unless
+`rpm_requires`/`deb_depends` is set, because package names differ between
+MySQL Community, distribution and Percona builds.
+
+SDK images prepared before rpm/deb support install `rpm-build`/`dpkg` on the fly
+but carry the old `package-component`; the workflow then stops with an error
+unless `package_formats: tgz`. Rebuild those images to get the new helper.
 
 ## Optional MTR tests
 
@@ -191,20 +233,17 @@ for those libraries to be available in this directory or adjust the test setup.
 ## Validation
 
 ```bash
-python3 -m unittest discover -s tests -v
 bash -n sdk/prepare scripts/package-component
+python3 -m py_compile scripts/build-component
 actionlint
 ```
 
-Tests exercise target detection and rejection, version matrix validation, a real
-CMake module build with a deliberately failing default/server target, package
-contents/checksums, and local clone/update mode. They do not establish server ABI
-compatibility. Validate SDK preparation and an actual component on each selected
+These checks do not establish server ABI compatibility. Validate SDK preparation and an actual component on each selected
 MySQL release before publishing images. Hosted Actions, registry publishing, and
 MTR require separate integration validation.
 
-Initial validation with the previous Ubuntu base: helper tests, Bash syntax,
-and actionlint passed. The Ubuntu
+Initial validation with the previous Ubuntu base: Bash syntax and actionlint
+passed. The Ubuntu
 container's dependency installation also completed. Full SDK preparation and a
 real UUID v7 build remain unverified: the upstream source transfer failed over
 HTTP/2, and the slow HTTP/1.1 retry was stopped before configuration. No SDK image

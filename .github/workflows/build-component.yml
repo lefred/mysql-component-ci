@@ -75,6 +75,26 @@ on:
         description: Path inside a custom SDK to a matching prebuilt MySQL binary distribution with MTR
         default: ''
         type: string
+      package_formats:
+        description: Package formats to produce (tgz, rpm, deb) - whitespace-separated
+        default: tgz rpm deb
+        type: string
+      package_license:
+        description: License recorded in rpm/deb metadata, for example GPL-2.0-only
+        default: Unknown
+        type: string
+      package_maintainer:
+        description: Debian Maintainer field; defaults to the repository owner's GitHub noreply address
+        default: ''
+        type: string
+      rpm_requires:
+        description: Optional RPM Requires value, for example mysql-community-server = 8.4.6
+        default: ''
+        type: string
+      deb_depends:
+        description: Optional Debian Depends value, for example mysql-server (= 8.4.6-1ubuntu24.04)
+        default: ''
+        type: string
 
 permissions:
   contents: read
@@ -91,6 +111,7 @@ jobs:
           VERSIONS: ${{ inputs.mysql_versions }}
           SDK_IMAGE: ${{ inputs.sdk_image }}
           SDK_IMAGES: ${{ inputs.sdk_images }}
+          PACKAGE_FORMATS: ${{ inputs.package_formats }}
         run: |
           python3 - <<'PYTHON'
           import json, os, re
@@ -101,6 +122,9 @@ jobs:
           images = json.loads(os.environ['SDK_IMAGES'])
           if not isinstance(images, dict):
               raise SystemExit('sdk_images must be a JSON object')
+          formats = os.environ.get('PACKAGE_FORMATS', 'tgz').split()
+          if not formats or any(f not in ('tgz', 'rpm', 'deb') for f in formats):
+              raise SystemExit('package_formats must list tgz, rpm and/or deb')
           matrix = []
           for version in versions:
               if not isinstance(version, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
@@ -165,6 +189,19 @@ jobs:
           if [[ -n "$EXTRA_PACKAGES" ]]; then
             read -r -a packages <<< "$EXTRA_PACKAGES"
             dnf install -y -- "${packages[@]}"
+          fi
+
+      - name: Install packaging tools
+        env:
+          PACKAGE_FORMATS: ${{ inputs.package_formats }}
+        run: |
+          set -euo pipefail
+          # Images prepared before rpm/deb support lack these tools.
+          tools=()
+          [[ " $PACKAGE_FORMATS " != *" rpm "* ]] || command -v rpmbuild >/dev/null || tools+=(rpm-build)
+          [[ " $PACKAGE_FORMATS " != *" deb "* ]] || command -v dpkg-deb >/dev/null || tools+=(dpkg)
+          if (( ${#tools[@]} )); then
+            dnf install -y -- "${tools[@]}"
           fi
 
       - name: Build only the component target
@@ -238,16 +275,41 @@ jobs:
           PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
           COMPONENT_PATH: ${{ steps.locate-component.outputs.path }}
           COMPONENT_BUILD_DIR: ${{ steps.locate-component.outputs.build_dir }}
+          PACKAGE_FORMATS: ${{ inputs.package_formats }}
+          PACKAGE_LICENSE: ${{ inputs.package_license }}
+          PACKAGE_MAINTAINER: ${{ inputs.package_maintainer }}
+          RPM_REQUIRES: ${{ inputs.rpm_requires }}
+          DEB_DEPENDS: ${{ inputs.deb_depends }}
         shell: bash
-        run: /home/buildbot/bin/package-component
+        run: |
+          set -euo pipefail
+          # Images prepared before rpm/deb support carry an older helper.
+          helper=/home/buildbot/bin/package-component
+          read -r -a formats <<< "$PACKAGE_FORMATS"
+          if [[ "${formats[*]}" != tgz ]] && ! grep -q PACKAGE_FORMATS "$helper"; then
+            echo '::error::This SDK image predates rpm/deb packaging; rebuild it or set package_formats: tgz'
+            exit 1
+          fi
+          "$helper"
+          shopt -s nullglob
+          cd dist
+          for package in *.rpm; do
+            rpm -qpil --requires -- "$package"
+          done
+          for package in *.deb; do
+            dpkg-deb --info -- "$package"
+            dpkg-deb --contents -- "$package"
+          done
 
       - name: Upload package
         uses: actions/upload-artifact@v7
         with:
           name: ${{ steps.package.outputs.basename }}
           path: |
-            dist/${{ steps.package.outputs.basename }}.tar.gz
-            dist/${{ steps.package.outputs.basename }}.tar.gz.sha256
+            dist/*.tar.gz
+            dist/*.rpm
+            dist/*.deb
+            dist/*.sha256
           if-no-files-found: error
           retention-days: ${{ inputs.artifact_retention_days }}
 
@@ -287,7 +349,7 @@ jobs:
             find release-assets \
               -maxdepth 1 \
               -type f \
-              -name '*.tar.gz' |
+              ! -name '*.sha256' |
               wc -l
           )"
 

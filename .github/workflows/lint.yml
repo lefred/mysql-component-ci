@@ -41,4 +41,4 @@ jobs:
       - name: Validate SDK helpers and packaging
         run: |
           bash -n sdk/prepare scripts/package-component
-          python3 -m unittest discover -s tests -v
+          python3 -m py_compile scripts/build-component

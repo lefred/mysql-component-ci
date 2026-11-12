@@ -1,10 +1,32 @@
+# EL8 keeps the MariaDB build worker; EL9/EL10 start from plain AlmaLinux:
+#   --build-arg BASE_IMAGE=docker.io/library/almalinux:10
 ARG BASE_IMAGE=quay.io/mariadb-foundation/bb-worker:almalinux8-bintar
 FROM ${BASE_IMAGE}
 USER root
 ARG EXTRA_PACKAGES="clamav-devel"
-RUN dnf install -y epel-release && dnf install -y python3 libtirpc-devel rpcgen libcurl-devel libarchive-devel git openssl-devel rpm-build dpkg ca-certificates curl tar gzip libaio libaio-devel ncurses-libs numactl-libs gcc-toolset-14-gcc gcc-toolset-14-gcc-c++ gcc-toolset-14-binutils gcc-toolset-14-annobin-annocheck gcc-toolset-14-annobin-plugin-gcc ${EXTRA_PACKAGES} && dnf clean all
+# EL8/EL9 build with gcc-toolset-14 (picked up by MySQL's CMake); EL10's system
+# GCC is 14. The EL release is recorded so the build workflow can check it.
+RUN set -eux; \
+    el="$(. /etc/os-release && echo "${VERSION_ID%%.*}")"; \
+    case "$el" in 8|9|10) ;; *) echo "Unsupported EL release: $el" >&2; exit 1 ;; esac; \
+    dnf install -y dnf-plugins-core epel-release; \
+    if [ "$el" = 8 ]; then dnf config-manager --set-enabled powertools; else dnf config-manager --set-enabled crb; fi; \
+    toolset=; \
+    if [ "$el" != 10 ]; then \
+      toolset="gcc-toolset-14-gcc gcc-toolset-14-gcc-c++ gcc-toolset-14-binutils gcc-toolset-14-annobin-annocheck gcc-toolset-14-annobin-plugin-gcc"; \
+    fi; \
+    dnf install -y --allowerasing \
+      gcc gcc-c++ make cmake bison flex perl git python3 which findutils procps-ng diffutils file \
+      openssl-devel ncurses-devel zlib-devel libtirpc-devel rpcgen libaio-devel numactl-devel \
+      systemd-devel libcurl-devel libarchive-devel \
+      rpm-build dpkg ca-certificates curl tar gzip bzip2 \
+      $toolset ${EXTRA_PACKAGES}; \
+    dnf clean all; \
+    id buildbot >/dev/null 2>&1 || useradd -m -u 1000 -s /bin/bash buildbot; \
+    mkdir -p /home/buildbot/bin; \
+    printf '%s\n' "$el" > /home/buildbot/mysql-sdk-el
 COPY sdk/prepare /home/buildbot/bin/prepare-component-sdk
-RUN chmod 0755 /home/buildbot/bin/prepare-component-sdk && chown -R buildbot:buildbot /home/buildbot/bin
+RUN chmod 0755 /home/buildbot/bin/prepare-component-sdk && chown -R buildbot:buildbot /home/buildbot
 USER buildbot
 ARG MYSQL_VERSION
 RUN /home/buildbot/bin/prepare-component-sdk
@@ -14,5 +36,6 @@ COPY --chown=buildbot:buildbot --chmod=0755 scripts/build-component scripts/pack
 RUN git config --system --add safe.directory /home/buildbot/mysql-server
 USER buildbot
 WORKDIR /home/buildbot/mysql-server/build
+ENV PATH=/home/buildbot/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 ENTRYPOINT []
 CMD ["/bin/bash"]

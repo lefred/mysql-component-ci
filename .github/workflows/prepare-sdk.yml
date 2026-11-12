@@ -6,6 +6,11 @@ on:
         description: Exact released MySQL version (x.y.z)
         required: true
         type: string
+      el_version:
+        description: Enterprise Linux release of the SDK (and of its RPMs)
+        type: choice
+        options: ['8', '9', '10']
+        default: '8'
       image_repository:
         description: Registry repository to publish
         default: quay.io/lefred14/mysql-component-build
@@ -15,8 +20,8 @@ on:
         default: ''
         type: string
       base_image:
-        description: Build worker image (use a digest for reproducibility)
-        default: quay.io/mariadb-foundation/bb-worker:almalinux8-bintar
+        description: Base image; empty uses the MariaDB EL8 build worker for 8, almalinux:N otherwise (use a digest for reproducibility)
+        default: ''
         type: string
 permissions:
   contents: read
@@ -28,16 +33,31 @@ jobs:
       IMAGE: ${{ inputs.image_repository }}
       EXTRA_PACKAGES: ${{ inputs.extra_packages }}
       BASE_IMAGE: ${{ inputs.base_image }}
+      EL_VERSION: ${{ inputs.el_version }}
     steps:
       - uses: actions/checkout@v5
       - name: Configure SDK without compiling MySQL
         run: |
           set -euo pipefail
           [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'Expected exact x.y.z release'; exit 1; }
-          podman build -f sdk/Containerfile -t "$IMAGE:$VERSION" \
+          if [[ -z "$BASE_IMAGE" ]]; then
+            if [[ "$EL_VERSION" == 8 ]]; then
+              BASE_IMAGE=quay.io/mariadb-foundation/bb-worker:almalinux8-bintar
+            else
+              BASE_IMAGE="docker.io/library/almalinux:$EL_VERSION"
+            fi
+          fi
+          # EL8 images keep the plain version tag used before EL9/EL10 support.
+          tag="$VERSION"
+          [[ "$EL_VERSION" == 8 ]] || tag="$VERSION-el$EL_VERSION"
+          echo "TAG=$tag" >> "$GITHUB_ENV"
+          podman build -f sdk/Containerfile -t "$IMAGE:$tag" \
             --build-arg "MYSQL_VERSION=$VERSION" \
             --build-arg "BASE_IMAGE=$BASE_IMAGE" \
             --build-arg "EXTRA_PACKAGES=$EXTRA_PACKAGES" .
+          test "$(podman run --rm "$IMAGE:$tag" cat /home/buildbot/mysql-sdk-el)" = "$EL_VERSION" || {
+            echo "::error::Base image $BASE_IMAGE is not EL$EL_VERSION"; exit 1;
+          }
       - name: Publish SDK
         env:
           REGISTRY_USER: ${{ secrets.SDK_REGISTRY_USER }}
@@ -45,5 +65,5 @@ jobs:
         run: |
           set -euo pipefail
           printf '%s' "$REGISTRY_PASSWORD" | podman login "${IMAGE%%/*}" --username "$REGISTRY_USER" --password-stdin
-          podman push --digestfile sdk.digest "$IMAGE:$VERSION"
+          podman push --digestfile sdk.digest "$IMAGE:$TAG"
           echo "Prepared SDK: $IMAGE@$(cat sdk.digest)" >> "$GITHUB_STEP_SUMMARY"

@@ -79,6 +79,10 @@ on:
         description: Package formats to produce (tgz, rpm, deb) - whitespace-separated
         default: tgz rpm deb
         type: string
+      el_versions:
+        description: Enterprise Linux SDK releases to build on (8, 9, 10) - whitespace-separated; RPMs are built on each, tgz/deb only on the oldest
+        default: '8'
+        type: string
       package_license:
         description: License recorded in rpm/deb metadata, for example GPL-2.0-only
         default: Unknown
@@ -112,6 +116,7 @@ jobs:
           SDK_IMAGE: ${{ inputs.sdk_image }}
           SDK_IMAGES: ${{ inputs.sdk_images }}
           PACKAGE_FORMATS: ${{ inputs.package_formats }}
+          EL_VERSIONS: ${{ inputs.el_versions }}
         run: |
           python3 - <<'PYTHON'
           import json, os, re
@@ -125,22 +130,33 @@ jobs:
           formats = os.environ.get('PACKAGE_FORMATS', 'tgz').split()
           if not formats or any(f not in ('tgz', 'rpm', 'deb') for f in formats):
               raise SystemExit('package_formats must list tgz, rpm and/or deb')
+          els = sorted(set(os.environ.get('EL_VERSIONS', '8').split()), key=int)
+          if not els or any(el not in ('8', '9', '10') for el in els):
+              raise SystemExit('el_versions must list 8, 9 and/or 10')
           matrix = []
           for version in versions:
               if not isinstance(version, str) or not re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', version):
                   raise SystemExit('Use exact MySQL releases (x.y.z), not branches or wildcards')
-              image = images.get(version, os.environ['SDK_IMAGE'] + ':' + version)
-              if not isinstance(image, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9./:@_-]*', image):
-                  raise SystemExit('Invalid SDK image reference')
-              row = {'mysql_version': version, 'image': image}
-              if row not in matrix:
-                  matrix.append(row)
+              for el in els:
+                  # The oldest EL (lowest glibc) builds the portable tarball and
+                  # deb; newer ones only add their own RPM.
+                  row_formats = [f for f in formats if el == els[0] or f == 'rpm']
+                  if not row_formats:
+                      continue
+                  # EL8 SDKs keep the plain version tag used before EL9/EL10 support.
+                  tag = version if el == '8' else version + '-el' + el
+                  image = images.get(tag, os.environ['SDK_IMAGE'] + ':' + tag)
+                  if not isinstance(image, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9./:@_-]*', image):
+                      raise SystemExit('Invalid SDK image reference')
+                  row = {'mysql_version': version, 'el': el, 'image': image, 'formats': ' '.join(row_formats)}
+                  if row not in matrix:
+                      matrix.append(row)
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('matrix=' + json.dumps({'include': matrix}) + '\n')
           PYTHON
 
   build:
-    name: MySQL ${{ matrix.mysql_version }}
+    name: MySQL ${{ matrix.mysql_version }} (EL${{ matrix.el }}, ${{ matrix.formats }})
     needs: versions
     runs-on: ubuntu-24.04
     strategy:
@@ -157,6 +173,8 @@ jobs:
       COMPONENT_LIBRARY: ${{ inputs.component_library }}
       CMAKE_OPTIONS: ${{ inputs.cmake_options }}
       MYSQL_VERSION: ${{ matrix.mysql_version }}
+      EL_VERSION: ${{ matrix.el }}
+      PACKAGE_FORMATS: ${{ matrix.formats }}
     steps:
       - name: Check out component repository at triggering commit
         uses: actions/checkout@v5
@@ -172,6 +190,11 @@ jobs:
           set -euo pipefail
           test "$(cat /home/buildbot/mysql-sdk-version)" = "$MYSQL_VERSION" || {
             echo '::error::SDK version does not match the requested MySQL release'; exit 1;
+          }
+          # Images prepared before EL9/EL10 support do not record it and are EL8.
+          sdk_el="$(cat /home/buildbot/mysql-sdk-el 2>/dev/null || echo 8)"
+          test "$sdk_el" = "$EL_VERSION" || {
+            echo "::error::SDK image is EL$sdk_el, expected EL$EL_VERSION"; exit 1;
           }
           test -f /home/buildbot/mysql-server/build/CMakeCache.txt
           test -x /home/buildbot/bin/build-component
@@ -192,8 +215,6 @@ jobs:
           fi
 
       - name: Install packaging tools
-        env:
-          PACKAGE_FORMATS: ${{ inputs.package_formats }}
         run: |
           set -euo pipefail
           # Images prepared before rpm/deb support lack these tools.
@@ -275,7 +296,6 @@ jobs:
           PACKAGE_VERSION: ${{ steps.package-version.outputs.version }}
           COMPONENT_PATH: ${{ steps.locate-component.outputs.path }}
           COMPONENT_BUILD_DIR: ${{ steps.locate-component.outputs.build_dir }}
-          PACKAGE_FORMATS: ${{ inputs.package_formats }}
           PACKAGE_LICENSE: ${{ inputs.package_license }}
           PACKAGE_MAINTAINER: ${{ inputs.package_maintainer }}
           RPM_REQUIRES: ${{ inputs.rpm_requires }}
@@ -304,7 +324,7 @@ jobs:
       - name: Upload package
         uses: actions/upload-artifact@v7
         with:
-          name: ${{ steps.package.outputs.basename }}
+          name: ${{ steps.package.outputs.basename }}-el${{ matrix.el }}
           path: |
             dist/*.tar.gz
             dist/*.rpm

@@ -11,12 +11,14 @@ The helpers never request a server or global build.
 Set repository Actions secrets `SDK_REGISTRY_USER` and `SDK_REGISTRY_PASSWORD`
 for a registry account with push access. Dispatch
 [prepare-sdk.yml](.github/workflows/prepare-sdk.yml) with an exact `mysql_version`
-(such as `8.4.6`) and your `image_repository`.
+(such as `8.4.6`), an `el_version` (`8`, `9` or `10`) and your `image_repository`.
+EL8 images are tagged `<version>` (as before); EL9/EL10 images `<version>-el<N>`.
 The default destination is `quay.io/lefred14/mysql-component-build`.
 Images must be public for the reusable workflow; no images are assumed to exist.
 
-The image uses the AlmaLinux 8 MariaDB build worker, its GCC/CMake toolchain,
-and development dependencies.
+EL8 images use the AlmaLinux 8 MariaDB build worker, EL9/EL10 images plain
+`almalinux:9`/`almalinux:10`; the Containerfile adds the same dependency set to
+both. EL8/EL9 build with `gcc-toolset-14`, EL10 with its system GCC 14.
 It checks out the exact upstream `mysql-X.Y.Z` tag into
 `/home/buildbot/mysql-server`, verifies the tag, detaches HEAD, and configures
 `build/` with RelWithDebInfo, system OpenSSL, unit tests disabled, and Router disabled.
@@ -29,12 +31,18 @@ during SDK preparation.
 podman build -f sdk/Containerfile \
   --build-arg MYSQL_VERSION=8.4.6 \
   -t localhost/mysql-component-build:8.4.6 .
+
+# EL10
+podman build -f sdk/Containerfile \
+  --build-arg BASE_IMAGE=docker.io/library/almalinux:10 \
+  --build-arg MYSQL_VERSION=8.4.6 \
+  -t localhost/mysql-component-build:8.4.6-el10 .
 ```
 
-`BASE_IMAGE` must provide the AlmaLinux-compatible DNF packages, buildbot user,
-`/home/buildbot/bin`, and build toolchain expected by the Containerfile.
-`EXTRA_PACKAGES` supplies whitespace-separated RPM packages. This repository
-uses the MariaDB worker image but does not add Galera configuration.
+`BASE_IMAGE` must be an EL8, EL9 or EL10 (AlmaLinux-compatible) image; the
+Containerfile creates the `buildbot` user when missing and records the EL
+release in `/home/buildbot/mysql-sdk-el`. `EXTRA_PACKAGES` supplies
+whitespace-separated RPM packages (default `clamav-devel`).
 Built binaries require compatible glibc, libstdc++, and runtime libraries
 on the destination; they are not universal Linux binaries.
 
@@ -103,6 +111,7 @@ Other inputs:
 | `test_runtime` | Absolute path inside a custom SDK to that runtime |
 | `test_suite` | MTR suite name; defaults to component directory/repository name |
 | `package_formats` | `tgz`, `rpm` and/or `deb`, whitespace-separated; defaults to all three |
+| `el_versions` | EL SDKs to build on (`8`, `9`, `10`); defaults to `8`. RPMs are built on each, tgz/deb only on the oldest |
 | `package_license` | License in rpm/deb metadata (for example `GPL-2.0-only`); defaults to `Unknown` |
 | `package_maintainer` | Debian `Maintainer`; defaults to the repository owner's GitHub noreply address |
 | `rpm_requires` | Optional RPM `Requires`, for example `mysql-community-server = 8.4.6` |
@@ -204,9 +213,18 @@ The MySQL release is part of the RPM release / Debian revision, since a componen
 only works with the server it was built against. `PACKAGE_RELEASE` (default 1)
 sets the package release number when running `package-component` by hand.
 
-Both formats are built inside the AlmaLinux 8 SDK (`rpmbuild`, and `dpkg-deb`
-from EPEL). RPMs get automatic shared-library `Requires`; the `.deb` only gets
-what `deb_depends` lists, and its binary is the same EL8-built library, so
+Each EL release in `el_versions` needs its own SDK image and produces its own
+RPM (`.el8`, `.el9`, `.el10`), built against that release's glibc and OpenSSL:
+
+```yaml
+      mysql_versions: '8.4.6'
+      el_versions: '8 10'
+```
+
+The tarball and the deb are built only once, on the oldest EL selected, since
+its lower glibc requirement runs on the most systems. RPMs get automatic
+shared-library `Requires`; the `.deb` only gets what `deb_depends` lists, and
+its binary is the same EL-built library, so
 check that its runtime libraries (for example OpenSSL 1.1 versus 3) exist on the
 target Debian/Ubuntu release. No dependency on a server package is added unless
 `rpm_requires`/`deb_depends` is set, because package names differ between
